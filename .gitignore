@@ -1,5 +1,10 @@
 # Secrets / env
 .env
+.secrets/
+
+# Temp GH CLI artifacts
+.tmp_pr_*.txt
+.tmp_pr_*.json
 
 # MCP server runtime
 .mcp_geo.pid
