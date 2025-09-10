@@ -13,7 +13,7 @@ from src.providers.echo import EchoProvider
 from src.providers.openai_provider import OpenAIProvider
 from src.connectors.mcp_client import MCPClient
 from src.connectors.a2a_client import A2AClient
-from src.utils.intent import detect_geocode_query
+from src.utils.intent import detect_geocode_query, detect_timetable_intent
 
 
 def get_provider(name: str):
@@ -46,20 +46,31 @@ def main(argv: List[str] | None = None) -> int:
     provider_name = cfg.provider or "echo"
     provider = get_provider(provider_name)
     mcp: MCPClient | None = None
+    mcp_tt: MCPClient | None = None
     a2a: A2AClient | None = None
 
     session = ChatSession()
     print("CLI Chatbot (provider: %s). Type /help for commands." % provider_name)
 
-    # Auto-connect MCP at startup (uses env or local default)
+    # Auto-connect Geo MCP at startup (uses env or local default)
     try:
         mcp_endpoint = cfg.mcp_endpoint or "http://127.0.0.1:8081/mcp"
         mcp = MCPClient(mcp_endpoint)
         mcp.connect()
-        print(f"MCP connected ({mcp_endpoint}).")
+        print(f"Geo MCP connected ({mcp_endpoint}).")
     except Exception as e:
         mcp = None
-        print(f"MCP not connected: {e} (start server or set MCP_ENDPOINT)")
+        print(f"Geo MCP not connected: {e} (start geo server or set MCP_ENDPOINT)")
+
+    # Auto-connect Timetable MCP
+    try:
+        tt_endpoint = cfg.timetable_endpoint or "http://127.0.0.1:8082/mcp"
+        mcp_tt = MCPClient(tt_endpoint)
+        mcp_tt.connect()
+        print(f"Timetable MCP connected ({tt_endpoint}).")
+    except Exception as e:
+        mcp_tt = None
+        print(f"Timetable MCP not connected: {e} (start timetable server or set TIMETABLE_ENDPOINT)")
 
     try:
         while True:
@@ -148,6 +159,125 @@ def main(argv: List[str] | None = None) -> int:
                     print(f"Error: {e}")
                 continue
 
+            # Intent: timetable (auto-call timetable MCP if available)
+            tt_intent = detect_timetable_intent(user)
+            if tt_intent:
+                if not mcp_tt:
+                    endpoint = cfg.timetable_endpoint or "http://127.0.0.1:8082/mcp"
+                    mcp_tt = MCPClient(endpoint)
+                    try:
+                        mcp_tt.connect()
+                    except Exception as e:
+                        print(f"[timetable mcp unavailable] {e}")
+                        mcp_tt = None
+                if mcp_tt:
+                    # helper: adjust date to match week hint if provided
+                    def _adjust_date_for_week_hint(d0):
+                        if not tt_intent.week_hint or not d0:
+                            return d0
+                        check = {"method": "timetable.weekType", "params": {"date": d0.isoformat()}}
+                        r = mcp_tt.send(check)
+                        wk = None
+                        if isinstance(r, dict) and r.get("ok"):
+                            wk = (r.get("result") or {}).get("week")
+                        if wk and wk != tt_intent.week_hint:
+                            try:
+                                from datetime import timedelta as _td
+                                return d0 + _td(days=7)
+                            except Exception:
+                                return d0
+                        return d0
+
+                    if tt_intent.kind == "day" and tt_intent.date:
+                        dd = _adjust_date_for_week_hint(tt_intent.date)
+                        payload = {"method": "timetable.day", "params": {"date": dd.isoformat()}}
+                        resp = mcp_tt.send(payload)
+                        if isinstance(resp, dict) and resp.get("ok"):
+                            pr = resp.get("result") or {}
+                            lessons = pr.get("lessons") or []
+                            lines = ["MCP: Timetable", f"Week {pr.get('week')} schedule for {dd.isoformat()}"]
+                            for les in lessons:
+                                lines.append(f"{les.get('start')}-{les.get('end')}: {les.get('subject')} ({les.get('room')})")
+                            reply = "\n".join(lines if lines else ["MCP: Timetable", "No lessons found."])
+                            session.add_user(user)
+                            session.add_assistant(reply)
+                            print(f"bot> {reply}")
+                            continue
+                    elif tt_intent.kind == "at" and tt_intent.date is not None:
+                        dd = _adjust_date_for_week_hint(tt_intent.date)
+                        hh = tt_intent.time_h or 0
+                        mm = tt_intent.time_m or 0
+                        iso = f"{dd.isoformat()}T{hh:02d}:{mm:02d}"
+                        payload = {"method": "timetable.at", "params": {"datetime": iso}}
+                        resp = mcp_tt.send(payload)
+                        if isinstance(resp, dict) and resp.get("ok"):
+                            pr = resp.get("result") or {}
+                            les = pr.get("lesson")
+                            if les:
+                                reply = "\n".join([
+                                    "MCP: Timetable",
+                                    f"At {iso} (Week {pr.get('week')}): {les.get('subject')} in {les.get('room')} ({les.get('start')}-{les.get('end')})",
+                                ])
+                            else:
+                                reply = "\n".join(["MCP: Timetable", f"At {iso}: no lesson."])
+                            session.add_user(user)
+                            session.add_assistant(reply)
+                            print(f"bot> {reply}")
+                            continue
+                    elif tt_intent.kind == "period" and tt_intent.date is not None:
+                        dd = _adjust_date_for_week_hint(tt_intent.date)
+                        payload = {"method": "timetable.day", "params": {"date": dd.isoformat()}}
+                        resp = mcp_tt.send(payload)
+                        if isinstance(resp, dict) and resp.get("ok"):
+                            pr = resp.get("result") or {}
+                            lessons = pr.get("lessons") or []
+                            if lessons:
+                                if tt_intent.period_last:
+                                    target = lessons[-1]
+                                else:
+                                    idx = max(1, tt_intent.period_ordinal or 1) - 1
+                                    target = lessons[idx] if idx < len(lessons) else None
+                                if target:
+                                    reply = "\n".join([
+                                        "MCP: Timetable",
+                                        f"{('Last' if tt_intent.period_last else f'Period {idx+1}')} on {dd.isoformat()} (Week {pr.get('week')}): {target.get('subject')} in {target.get('room')} ({target.get('start')}-{target.get('end')})",
+                                    ])
+                                else:
+                                    reply = "\n".join(["MCP: Timetable", f"No such period on {dd.isoformat()} (has only {len(lessons)} lessons)."])
+                            else:
+                                reply = "\n".join(["MCP: Timetable", f"No lessons on {dd.isoformat()}."])
+                            session.add_user(user)
+                            session.add_assistant(reply)
+                            print(f"bot> {reply}")
+                            continue
+                    elif tt_intent.kind == "next":
+                        payload = {"method": "timetable.next", "params": {}}
+                        resp = mcp_tt.send(payload)
+                        if isinstance(resp, dict) and resp.get("ok"):
+                            pr = resp.get("result") or {}
+                            les = pr.get("lesson")
+                            if les:
+                                reply = "\n".join([
+                                    "MCP: Timetable",
+                                    f"Next lesson (Week {pr.get('week')}): {les.get('subject')} in {les.get('room')} at {les.get('start')} ({les.get('start')}-{les.get('end')})",
+                                ])
+                            else:
+                                reply = "\n".join(["MCP: Timetable", "No upcoming lesson found soon."])
+                            session.add_user(user)
+                            session.add_assistant(reply)
+                            print(f"bot> {reply}")
+                            continue
+                    elif tt_intent.kind == "weekType" and tt_intent.date is not None:
+                        payload = {"method": "timetable.weekType", "params": {"date": tt_intent.date.isoformat()}}
+                        resp = mcp_tt.send(payload)
+                        if isinstance(resp, dict) and resp.get("ok"):
+                            pr = resp.get("result") or {}
+                            reply = "\n".join(["MCP: Timetable", f"Week type for {tt_intent.date.isoformat()}: {pr.get('week')}"])
+                            session.add_user(user)
+                            session.add_assistant(reply)
+                            print(f"bot> {reply}")
+                            continue
+
             # Intent: geocode (auto-call MCP if available)
             geo_q = detect_geocode_query(user)
             if geo_q:
@@ -203,4 +333,3 @@ def main(argv: List[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-
