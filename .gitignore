@@ -1,0 +1,29 @@
+# Secrets / env
+.env
+
+# MCP server runtime
+.mcp_geo.pid
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+.cache/
+
