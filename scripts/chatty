@@ -1,7 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+# Resolve repo root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
-exec python3 -m src.main "$@"
 
+# Auto-start Timetable MCP if not running
+if "$SCRIPT_DIR/ttmcp" status >/dev/null 2>&1; then
+  :
+else
+  echo "Starting Timetable MCP..."
+  "$SCRIPT_DIR/ttmcp" start >/dev/null 2>&1 || true
+  # small grace period
+  sleep 0.2 || true
+fi
+
+# Auto-start Geo MCP if not running
+if "$SCRIPT_DIR/gmcp" status >/dev/null 2>&1; then
+  :
+else
+  echo "Starting Geo MCP..."
+  "$SCRIPT_DIR/gmcp" start >/dev/null 2>&1 || true
+  sleep 0.2 || true
+fi
+
+exec python3 -m src.main "$@"

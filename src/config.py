@@ -12,6 +12,7 @@ class Config:
     provider: str | None = None
     mcp_endpoint: str | None = None
     a2a_endpoint: str | None = None
+    timetable_endpoint: str | None = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -21,5 +22,5 @@ class Config:
             provider=os.getenv("CHAT_PROVIDER"),
             mcp_endpoint=os.getenv("MCP_ENDPOINT"),
             a2a_endpoint=os.getenv("A2A_ENDPOINT"),
+            timetable_endpoint=os.getenv("TIMETABLE_ENDPOINT"),
         )
-

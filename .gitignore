@@ -3,6 +3,7 @@
 
 # MCP server runtime
 .mcp_geo.pid
+.mcp_timetable.pid
 
 # Python artifacts
 __pycache__/
@@ -26,4 +27,3 @@ htmlcov/
 .idea/
 .vscode/
 .cache/
-
