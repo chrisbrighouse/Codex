@@ -14,7 +14,7 @@ PIDFILE = Path(".mcp_timetable.pid")
 # Defaults based on your earlier inputs
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8082
-DEFAULT_PATH = str(Path("assets/timetable.csv"))
+DEFAULT_PATH = str(Path("Assets/timetable.csv"))
 DEFAULT_WEEKA = "2025-09-08"  # Monday 8 Sep 2025
 DEFAULT_TZ = "Europe/London"
 
@@ -143,4 +143,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

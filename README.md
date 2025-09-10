@@ -26,13 +26,13 @@ This repo contains a simple CLI chatbot (`scripts/chatty`) and MCP servers for g
 Loads `assets/timetable.csv` and answers timetable questions with alternating Week A/B logic.
 
 - Control commands:
-  - Start: `scripts/ttmcp start` (defaults: host `127.0.0.1`, port `8082`, path `assets/timetable.csv`, week A `2025-09-08`, TZ `Europe/London`)
+  - Start: `scripts/ttmcp start` (defaults: host `127.0.0.1`, port `8082`, path `Assets/timetable.csv`, week A `2025-09-08`, TZ `Europe/London`)
   - Status: `scripts/ttmcp status`
   - Stop: `scripts/ttmcp stop`
   - Windows: use `scripts\ttmcp.bat` or `scripts\ttmcp.ps1`
 
 - Manual run:
-  - `python3 scripts/mcp_timetable_server.py --path assets/timetable.csv --weeka-start 2025-09-08 --tz Europe/London --host 127.0.0.1 --port 8082`
+  - `python3 scripts/mcp_timetable_server.py --path Assets/timetable.csv --weeka-start 2025-09-08 --tz Europe/London --host 127.0.0.1 --port 8082`
 
 - Endpoints:
   - `POST /mcp` methods: `timetable.weekType`, `timetable.day`, `timetable.at`, `timetable.next`
