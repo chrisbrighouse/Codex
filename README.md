@@ -37,9 +37,24 @@ Loads `assets/timetable.csv` and answers timetable questions with alternating We
 - Endpoints:
   - `POST /mcp` methods: `timetable.weekType`, `timetable.day`, `timetable.at`, `timetable.next`
   - Helper GETs: `/status`, `/day?date=YYYY-MM-DD`
+  - New: `timetable.find` — subject search (case-insensitive)
+    - Params: `subject` (required; accepts `subject|subj|lesson|class`), optional `date` (ISO date or `today|tomorrow|yesterday|Mon..Sun`) or `from`/`datetime`
+    - Behavior:
+      - With `date` only: returns lessons matching the subject on that date: `{week, date, lessons:[...]}`
+      - With `from`/`datetime` or none: finds the next matching lesson: `{week, lesson|null}`
 
 - Example chat queries handled automatically:
   - "what lessons on Tuesday week A?"
   - "first period tomorrow"
   - "3rd period on Friday week B"
   - "what lesson at 10:15 on Monday?"
+
+- Logging
+  - Log file: `.mcp_timetable.log` in the repo root.
+  - Start with log level (DEBUG recommended while testing):
+    - Unix/macOS: `scripts/ttmcp start --log-level DEBUG`
+    - Windows: `scripts\ttmcp.bat start --log-level DEBUG` or `scripts\ttmcp.ps1 start --log-level DEBUG`
+  - Stop: `scripts/ttmcp stop`
+  - Tail logs (Unix/macOS): `tail -f .mcp_timetable.log`
+  - View logs (Windows CMD): `type .mcp_timetable.log`
+  - View logs (PowerShell): `Get-Content .mcp_timetable.log -Wait`

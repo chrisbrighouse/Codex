@@ -34,6 +34,10 @@ Env/config:
 import argparse
 import csv
 import json
+import logging
+import threading
+import time
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
@@ -124,6 +128,7 @@ class Timetable:
         self._tz = ZoneInfo(self.tz) if ZoneInfo else None
         self.lessons: List[Lesson] = []
         self._index: Dict[Tuple[str, int], List[Lesson]] = {}
+        self._logger = logging.getLogger("mcp.timetable")
 
     def load(self) -> int:
         self.lessons.clear()
@@ -163,18 +168,28 @@ class Timetable:
             self._index.setdefault(key, []).append(les)
         for key in self._index:
             self._index[key].sort(key=lambda x: x.start_min)
+        # Debug summary per (week, day)
+        try:
+            by_key = {key: len(v) for key, v in self._index.items()}
+            self._logger.debug("index summary: %s", by_key)
+        except Exception:
+            pass
         return len(self.lessons)
 
     def week_type_for(self, d: date) -> str:
         # Week A on the reference week; alternate each 7 days
         delta = (d - self.week_a_start).days
         weeks = delta // 7
-        return "A" if weeks % 2 == 0 else "B"
+        wk = "A" if weeks % 2 == 0 else "B"
+        self._logger.debug("week_type_for d=%s delta=%d weeks=%d -> %s", d.isoformat(), delta, weeks, wk)
+        return wk
 
     def day_lessons(self, d: date) -> Dict[str, Any]:
         week = self.week_type_for(d)
         key = (week, d.weekday())
-        lessons = [l.to_public() for l in self._index.get(key, [])]
+        items = self._index.get(key, [])
+        self._logger.debug("day_lessons d=%s week=%s weekday=%d count=%d", d.isoformat(), week, d.weekday(), len(items))
+        lessons = [l.to_public() for l in items]
         return {"week": week, "lessons": lessons}
 
     def at(self, dt: datetime) -> Dict[str, Any]:
@@ -185,7 +200,16 @@ class Timetable:
         m = dt.hour * 60 + dt.minute
         week = self.week_type_for(d)
         key = (week, d.weekday())
+        self._logger.debug("at dt=%s (m=%d) week=%s weekday=%d candidates=%d", dt.isoformat(), m, week, d.weekday(), len(self._index.get(key, []) or []))
         for les in self._index.get(key, []):
+            self._logger.debug(
+                "consider window %s-%s (%d-%d) subj=%s",
+                minutes_to_hhmm(les.start_min),
+                minutes_to_hhmm(les.end_min),
+                les.start_min,
+                les.end_min,
+                les.subject,
+            )
             if les.start_min <= m < les.end_min:
                 return {"week": week, "lesson": les.to_public()}
         return {"week": week, "lesson": None}
@@ -200,7 +224,9 @@ class Timetable:
             m = cur.hour * 60 + cur.minute
             week = self.week_type_for(d)
             key = (week, d.weekday())
-            for les in self._index.get(key, []):
+            items = self._index.get(key, [])
+            self._logger.debug("next from=%s (m=%d) week=%s weekday=%d candidates=%d", cur.isoformat(), m, week, d.weekday(), len(items))
+            for les in items:
                 if les.start_min >= m:
                     return {"week": week, "lesson": les.to_public()}
             # move to next day at 00:00
@@ -208,9 +234,50 @@ class Timetable:
         return {"week": self.week_type_for(dt.date()), "lesson": None}
 
 
+def _first_param(params: dict, *names: str) -> Optional[str]:
+    """Return the first matching param value among `names` (case-insensitive).
+    Accepts both exact and case-variant keys; ignores non-string values.
+    """
+    if not isinstance(params, dict):
+        return None
+    lower_map = {str(k).lower(): v for k, v in params.items()}
+    for name in names:
+        v = lower_map.get(name.lower())
+        if v is None:
+            continue
+        if isinstance(v, str):
+            s = v.strip()
+            if s:
+                return s
+        else:
+            try:
+                s = str(v).strip()
+                if s:
+                    return s
+            except Exception:
+                pass
+    return None
+
+
+def _norm_subject(s: Optional[str]) -> str:
+    try:
+        return " ".join((s or "").strip().lower().split())
+    except Exception:
+        return (s or "").strip().lower()
+
+
+def _subject_matches(subj: str, query: Optional[str]) -> bool:
+    if not query:
+        return True
+    ns = _norm_subject(subj)
+    nq = _norm_subject(query)
+    return nq in ns if nq else True
+
+
 class TimetableHandler(BaseHTTPRequestHandler):
     server_version = "MCPTimetable/0.1"
     timetable: Timetable
+    logger = logging.getLogger("mcp.timetable")
 
     def _send_json(self, obj: dict, status: int = 200) -> None:
         data = json.dumps(obj).encode("utf-8")
@@ -223,6 +290,8 @@ class TimetableHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         try:
             parsed = urlparse(self.path)
+            req_id = f"g{int(time.time()*1000)}-{threading.get_ident()}"
+            self.logger.info("[%s] GET %s from %s", req_id, parsed.path, getattr(self, 'client_address', None))
             if parsed.path == "/status":
                 payload = {
                     "ok": True,
@@ -233,16 +302,22 @@ class TimetableHandler(BaseHTTPRequestHandler):
                         "lessons": len(self.timetable.lessons),
                     },
                 }
+                self.logger.debug("[%s] status path=%s tz=%s weeka=%s lessons=%d", req_id, self.timetable.csv_path, self.timetable.tz, self.timetable.week_a_start.isoformat(), len(self.timetable.lessons))
                 self._send_json(payload)
                 return
             if parsed.path == "/day":
                 qs = parse_qs(parsed.query)
-                ds = (qs.get("date") or [""])[0]
+                ds = (qs.get("date") or [""])[0].strip()
                 if not ds:
                     self._send_json({"ok": False, "error": "missing date"}, HTTPStatus.BAD_REQUEST)
                     return
-                d = date.fromisoformat(ds)
+                try:
+                    d = date.fromisoformat(ds)
+                except Exception:
+                    self._send_json({"ok": False, "error": f"invalid date: {ds}"}, HTTPStatus.BAD_REQUEST)
+                    return
                 out = self.timetable.day_lessons(d)
+                self.logger.info("[%s] GET /day date=%s week=%s count=%d", req_id, ds, out.get("week"), len(out.get("lessons") or []))
                 self._send_json({"ok": True, "result": out})
                 return
             self._send_json({"ok": False, "error": "not found"}, HTTPStatus.NOT_FOUND)
@@ -264,25 +339,170 @@ class TimetableHandler(BaseHTTPRequestHandler):
                 return
             method = (body.get("method") or "").lower()
             params = body.get("params") or {}
+            if not isinstance(params, dict):
+                params = {}
+            req_id = f"p{int(time.time()*1000)}-{threading.get_ident()}"
+            self.logger.info("[%s] POST /mcp method=%s from %s", req_id, method, getattr(self, 'client_address', None))
+            self.logger.debug("[%s] raw params=%s", req_id, params)
             if method == "timetable.weektype":
-                ds = (params.get("date") or "").strip()
-                d = date.fromisoformat(ds) if ds else date.today()
+                ds = _first_param(params, "date", "day", "on")
+                if ds:
+                    try:
+                        d = date.fromisoformat(ds)
+                    except Exception:
+                        self._send_json({"ok": False, "error": f"invalid date: {ds}"}, HTTPStatus.BAD_REQUEST)
+                        return
+                else:
+                    d = date.today()
                 self._send_json({"ok": True, "result": {"week": self.timetable.week_type_for(d)}})
+                wk = self.timetable.week_type_for(d)
+                self.logger.info("[%s] weekType date=%s -> %s", req_id, (ds or d.isoformat()), wk)
                 return
             if method == "timetable.day":
-                ds = (params.get("date") or "").strip()
-                d = date.fromisoformat(ds) if ds else date.today()
-                self._send_json({"ok": True, "result": self.timetable.day_lessons(d)})
+                ds = _first_param(params, "date", "day", "on")
+                subj_q = _first_param(params, "subject", "subj", "lesson", "class")
+                if ds:
+                    try:
+                        d = date.fromisoformat(ds)
+                    except Exception:
+                        self._send_json({"ok": False, "error": f"invalid date: {ds}"}, HTTPStatus.BAD_REQUEST)
+                        return
+                else:
+                    d = date.today()
+                self.logger.debug("[%s] resolve timetable.day ds=%s -> d=%s", req_id, ds, d.isoformat())
+                res = self.timetable.day_lessons(d)
+                if subj_q:
+                    before = len(res.get("lessons") or [])
+                    filtered = [les for les in (res.get("lessons") or []) if _subject_matches(les.get("subject") or "", subj_q)]
+                    res = {**res, "lessons": filtered}
+                    self.logger.debug("[%s] subject filter '%s' reduced %d -> %d", req_id, subj_q, before, len(filtered))
+                self._send_json({"ok": True, "result": res})
+                self.logger.info("[%s] day date=%s week=%s count=%d", req_id, (ds or d.isoformat()), res.get("week"), len(res.get("lessons") or []))
                 return
             if method == "timetable.at":
-                ts = (params.get("datetime") or "").strip()
-                dt = datetime.fromisoformat(ts)
-                self._send_json({"ok": True, "result": self.timetable.at(dt)})
+                ts = _first_param(params, "datetime", "dateTime", "at", "time", "timestamp")
+                subj_q = _first_param(params, "subject", "subj", "lesson", "class")
+                if not ts:
+                    self._send_json({"ok": False, "error": "missing datetime"}, HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    dt = datetime.fromisoformat(ts)
+                except Exception:
+                    self._send_json({"ok": False, "error": f"invalid datetime: {ts}"}, HTTPStatus.BAD_REQUEST)
+                    return
+                self.logger.debug("[%s] resolve timetable.at ts=%s -> dt=%s", req_id, ts, dt.isoformat())
+                res = self.timetable.at(dt)
+                if subj_q:
+                    les = res.get("lesson")
+                    if les and not _subject_matches(les.get("subject") or "", subj_q):
+                        self.logger.debug("[%s] subject filter '%s' excludes current lesson '%s'", req_id, subj_q, (les.get("subject") or ""))
+                        res = {**res, "lesson": None}
+                self._send_json({"ok": True, "result": res})
+                self.logger.info("[%s] at datetime=%s week=%s hit=%s", req_id, ts, res.get("week"), bool(res.get("lesson")))
                 return
             if method == "timetable.next":
-                ts = (params.get("from") or "").strip()
-                dt = datetime.fromisoformat(ts) if ts else datetime.now(self.timetable._tz) if self.timetable._tz else datetime.now()
-                self._send_json({"ok": True, "result": self.timetable.next(dt)})
+                ts = _first_param(params, "from", "start", "since", "datetime", "dateTime", "at", "time")
+                subj_q = _first_param(params, "subject", "subj", "lesson", "class")
+                if ts:
+                    try:
+                        dt = datetime.fromisoformat(ts)
+                    except Exception:
+                        self._send_json({"ok": False, "error": f"invalid datetime: {ts}"}, HTTPStatus.BAD_REQUEST)
+                        return
+                else:
+                    dt = datetime.now(self.timetable._tz) if self.timetable._tz else datetime.now()
+                self.logger.debug("[%s] resolve timetable.next ts=%s -> dt=%s", req_id, (ts or ""), dt.isoformat())
+                # If subject filter provided, search forward with subject match
+                if subj_q:
+                    cur = dt
+                    res = None
+                    for _ in range(14):
+                        d = cur.date()
+                        m = cur.hour * 60 + cur.minute
+                        week = self.timetable.week_type_for(d)
+                        key = (week, d.weekday())
+                        items = self.timetable._index.get(key, [])
+                        for les in items:
+                            if les.start_min >= m and _subject_matches(les.subject, subj_q):
+                                res = {"week": week, "lesson": les.to_public()}
+                                break
+                        if res:
+                            break
+                        cur = (datetime.combine(d, datetime.min.time()) + timedelta(days=1)).replace(tzinfo=dt.tzinfo)
+                    if not res:
+                        res = {"week": self.timetable.week_type_for(dt.date()), "lesson": None}
+                else:
+                    res = self.timetable.next(dt)
+                self._send_json({"ok": True, "result": res})
+                self.logger.info("[%s] next from=%s week=%s found=%s", req_id, (ts or dt.isoformat()), res.get("week"), bool(res.get("lesson")))
+                return
+            if method == "timetable.find":
+                subj_q = _first_param(params, "subject", "subj", "lesson", "class")
+                if not subj_q:
+                    self._send_json({"ok": False, "error": "missing subject"}, HTTPStatus.BAD_REQUEST)
+                    return
+                ds = _first_param(params, "date", "day", "on")
+                ts = _first_param(params, "from", "start", "since", "datetime", "dateTime", "at", "time")
+                self.logger.debug("[%s] resolve timetable.find subj='%s' ds=%s ts=%s", req_id, subj_q, ds, ts)
+                # If only a date is provided (and no time), return all matching lessons on that date
+                if ds and not ts:
+                    # Accept ISO date or simple day words
+                    try:
+                        d = date.fromisoformat(ds)
+                    except Exception:
+                        # try relative words
+                        w = ds.strip().lower()
+                        today = date.today()
+                        if w == "today":
+                            d = today
+                        elif w == "tomorrow":
+                            d = today + timedelta(days=1)
+                        elif w == "yesterday":
+                            d = today - timedelta(days=1)
+                        elif w in DAY_MAP:
+                            # next occurrence of weekday
+                            dow = DAY_MAP[w]
+                            delta = (dow - today.weekday()) % 7
+                            d = today + timedelta(days=delta)
+                        else:
+                            self._send_json({"ok": False, "error": f"invalid date: {ds}"}, HTTPStatus.BAD_REQUEST)
+                            return
+                    res = self.timetable.day_lessons(d)
+                    before = len(res.get("lessons") or [])
+                    filtered = [les for les in (res.get("lessons") or []) if _subject_matches(les.get("subject") or "", subj_q)]
+                    out = {**res, "lessons": filtered, "date": d.isoformat()}
+                    self._send_json({"ok": True, "result": out})
+                    self.logger.info("[%s] find(date) subj='%s' date=%s week=%s %d->%d", req_id, subj_q, d.isoformat(), res.get("week"), before, len(filtered))
+                    return
+                # Otherwise, search forward from a datetime (if provided) or now
+                if ts:
+                    try:
+                        dt = datetime.fromisoformat(ts)
+                    except Exception:
+                        self._send_json({"ok": False, "error": f"invalid datetime: {ts}"}, HTTPStatus.BAD_REQUEST)
+                        return
+                else:
+                    dt = datetime.now(self.timetable._tz) if self.timetable._tz else datetime.now()
+                cur = dt
+                found = None
+                for _ in range(14):
+                    d = cur.date()
+                    m = cur.hour * 60 + cur.minute
+                    week = self.timetable.week_type_for(d)
+                    key = (week, d.weekday())
+                    items = self.timetable._index.get(key, [])
+                    self.logger.debug("[%s] find scan d=%s week=%s m=%d candidates=%d", req_id, d.isoformat(), week, m, len(items))
+                    for les in items:
+                        if les.start_min >= m and _subject_matches(les.subject, subj_q):
+                            found = {"week": week, "lesson": les.to_public()}
+                            break
+                    if found:
+                        break
+                    cur = (datetime.combine(d, datetime.min.time()) + timedelta(days=1)).replace(tzinfo=dt.tzinfo)
+                if not found:
+                    found = {"week": self.timetable.week_type_for(dt.date()), "lesson": None}
+                self._send_json({"ok": True, "result": found})
+                self.logger.info("[%s] find(next) subj='%s' from=%s week=%s hit=%s", req_id, subj_q, (ts or dt.isoformat()), found.get("week"), bool(found.get("lesson")))
                 return
             self._send_json({"ok": False, "error": "unknown method"}, HTTPStatus.BAD_REQUEST)
         except Exception as e:
@@ -300,17 +520,34 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=8082)
     ap.add_argument("--weeka-start", required=True, help="Week A Monday reference (YYYY-MM-DD)")
     ap.add_argument("--tz", default="Europe/London", help="Timezone, e.g., Europe/London")
+    ap.add_argument("--log-level", default="INFO", help="Log level (DEBUG, INFO, WARNING, ERROR)")
     args = ap.parse_args()
+
+    # Configure logging: file + stdout
+    logger = logging.getLogger("mcp.timetable")
+    level = getattr(logging, str(args.log_level).upper(), logging.INFO)
+    logger.setLevel(level)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    try:
+        fh = logging.FileHandler(".mcp_timetable.log", encoding="utf-8")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+    except Exception:
+        pass
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    logger.addHandler(sh)
 
     tt = Timetable(csv_path=args.path, week_a_start=date.fromisoformat(args.weeka_start), tz=args.tz)
     count = tt.load()
     TimetableHandler.timetable = tt
+    TimetableHandler.logger = logger
 
     addr = (args.host, args.port)
     httpd = ThreadingHTTPServer(addr, TimetableHandler)
-    print(f"MCP Timetable Server listening on http://{args.host}:{args.port}")
-    print(f"Loaded {count} lessons from {args.path}; Week A start {args.weeka_start}; TZ {args.tz}")
-    print("Endpoints: POST /mcp | GET /status | GET /day?date=YYYY-MM-DD")
+    logger.info("MCP Timetable Server listening on http://%s:%d", args.host, args.port)
+    logger.info("Loaded %d lessons from %s; Week A start %s; TZ %s", count, args.path, args.weeka_start, args.tz)
+    logger.info("Endpoints: POST /mcp | GET /status | GET /day?date=YYYY-MM-DD")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -322,4 +559,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

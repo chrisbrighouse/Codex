@@ -187,6 +187,10 @@ def main(argv: List[str] | None = None) -> int:
                             except Exception:
                                 return d0
                         return d0
+                    def _subject_matches(name: str, query: str) -> bool:
+                        ns = " ".join((name or "").strip().lower().split())
+                        nq = " ".join((query or "").strip().lower().split())
+                        return nq in ns if nq else True
 
                     if tt_intent.kind == "day" and tt_intent.date:
                         dd = _adjust_date_for_week_hint(tt_intent.date)
@@ -333,3 +337,25 @@ def main(argv: List[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
+                    elif tt_intent.kind == "subject" and tt_intent.date is not None:
+                        dd = _adjust_date_for_week_hint(tt_intent.date)
+                        subj = tt_intent.subject or ""
+                        payload = {"method": "timetable.find", "params": {"date": dd.isoformat(), "subject": subj}}
+                        resp = mcp_tt.send(payload)
+                        if isinstance(resp, dict) and resp.get("ok"):
+                            pr = resp.get("result") or {}
+                            lessons = pr.get("lessons") or []
+                            if lessons:
+                                lines = [
+                                    "MCP: Timetable",
+                                    f"{subj} on {dd.isoformat()} (Week {pr.get('week')}):",
+                                ]
+                                for les in lessons:
+                                    lines.append(f"{les.get('start')}-{les.get('end')}: {les.get('subject')} ({les.get('room')})")
+                                reply = "\n".join(lines)
+                            else:
+                                reply = "\n".join(["MCP: Timetable", f"No {subj} on {dd.isoformat()}."])
+                            session.add_user(user)
+                            session.add_assistant(reply)
+                            print(f"bot> {reply}")
+                            continue

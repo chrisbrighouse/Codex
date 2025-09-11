@@ -27,7 +27,7 @@ def is_running(pid: int) -> bool:
         return False
 
 
-def start(host: str, port: int, path: str, weeka: str, tz: str) -> int:
+def start(host: str, port: int, path: str, weeka: str, tz: str, log_level: str | None = None) -> int:
     if PIDFILE.exists():
         try:
             pid = int(PIDFILE.read_text().strip())
@@ -61,6 +61,8 @@ def start(host: str, port: int, path: str, weeka: str, tz: str) -> int:
         "--tz",
         tz,
     ]
+    if log_level:
+        cmd += ["--log-level", log_level]
 
     kwargs = {}
     if os.name == "nt":
@@ -75,6 +77,7 @@ def start(host: str, port: int, path: str, weeka: str, tz: str) -> int:
     PIDFILE.write_text(str(proc.pid))
     print(f"Started Timetable MCP pid {proc.pid} on http://{host}:{port}")
     print(f"CSV: {path} | Week A: {weeka} | TZ: {tz}")
+    print(f"Log: .mcp_timetable.log (level: {log_level or 'INFO'})")
     return 0
 
 
@@ -127,13 +130,14 @@ def main() -> int:
     sp.add_argument("--path", default=DEFAULT_PATH)
     sp.add_argument("--weeka-start", default=DEFAULT_WEEKA)
     sp.add_argument("--tz", default=DEFAULT_TZ)
+    sp.add_argument("--log-level", default=None, help="Log level for server (DEBUG, INFO, WARNING, ERROR)")
 
     sub.add_parser("stop", help="Stop the server")
     sub.add_parser("status", help="Show server status")
 
     args = p.parse_args()
     if args.cmd == "start":
-        return start(args.host, args.port, args.path, args.weeka_start, args.tz)
+        return start(args.host, args.port, args.path, args.weeka_start, args.tz, args.log_level)
     if args.cmd == "stop":
         return stop()
     if args.cmd == "status":
